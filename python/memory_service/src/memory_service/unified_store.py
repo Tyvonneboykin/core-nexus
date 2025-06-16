@@ -709,39 +709,3 @@ class UnifiedVectorStore:
         except Exception as e:
             logger.error(f"Failed to refresh stats: {e}")
             raise
-
-
-
-    async def refresh_stats(self):
-        """Refresh stats with actual counts from providers."""
-        try:
-            # Get actual counts from each provider
-            total_memories = 0
-            provider_counts = {}
-            
-            for name, provider in self.providers.items():
-                if provider.enabled:
-                    try:
-                        stats = await provider.get_stats()
-                        if 'total_memories' in stats:
-                            count = stats['total_memories']
-                            total_memories += count
-                            provider_counts[name] = count
-                    except Exception as e:
-                        logger.warning(f"Failed to get stats from {name}: {e}")
-                        provider_counts[name] = 0
-            
-            # Update our stats with the actual counts
-            self.stats['total_stores'] = total_memories
-            
-            # Update provider usage if we have counts
-            for name, count in provider_counts.items():
-                if count > 0:
-                    self.stats['provider_usage'][name] = count
-            
-            logger.info(f"Refreshed stats: total_memories={total_memories}, by_provider={provider_counts}")
-            return total_memories
-            
-        except Exception as e:
-            logger.error(f"Failed to refresh stats: {e}")
-            raise
