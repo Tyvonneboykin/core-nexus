@@ -302,7 +302,7 @@ class UnifiedVectorStore:
                             memories = []
                     else:
                         try:
-                            emergency_search = EmergencySearchFix(pgvector.connection_pool, pgvector.table_name)
+                            emergency_search = EmergencySearchFix(pgvector.connection_pool, getattr(pgvector, "table_name", "vector_memories"))
                             # Get ALL memories directly
                             memories = await emergency_search.emergency_search_all(limit=request.limit)
                         except Exception as e:
@@ -377,7 +377,7 @@ class UnifiedVectorStore:
                 pgvector = self.providers.get('pgvector')
                 if pgvector and pgvector.enabled:
                     from .search_fix import EmergencySearchFix
-                    emergency_search = EmergencySearchFix(pgvector.connection_pool, pgvector.table_name)
+                    emergency_search = EmergencySearchFix(pgvector.connection_pool, getattr(pgvector, "table_name", "vector_memories"))
                     
                     # Try full-text search
                     memories = await emergency_search.text_search(request.query, limit=request.limit * 2)
@@ -572,7 +572,7 @@ class UnifiedVectorStore:
                         # Try emergency search as last resort
                         if provider.name == 'pgvector' and hasattr(provider, 'connection_pool'):
                             from .search_fix import EmergencySearchFix
-                            emergency = EmergencySearchFix(provider.connection_pool, provider.table_name)
+                            emergency = EmergencySearchFix(provider.connection_pool, getattr(provider, "table_name", "vector_memories"))
                             results = await emergency.emergency_search_all(request.limit * 2)
                         else:
                             results = []
