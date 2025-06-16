@@ -1340,6 +1340,36 @@ def create_memory_app() -> FastAPI:
         except Exception as e:
             logger.error(f"Failed to clear cache: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
+    
+    @app.post("/admin/refresh-stats")
+    async def refresh_stats(
+        admin_key: str | None = None,
+        store: UnifiedVectorStore = Depends(get_store)
+    ):
+        """
+        Manually refresh memory statistics from all providers.
+        
+        This fixes the issue where stats show 0 memories when there are actually memories in the database.
+        """
+        # Simple security check
+        if admin_key != os.getenv("ADMIN_KEY", "refresh-stats-2025"):
+            raise HTTPException(status_code=403, detail="Invalid admin key")
+        
+        try:
+            old_total = store.stats.get('total_stores', 0)
+            new_total = await store.refresh_stats()
+            
+            return {
+                "status": "success",
+                "old_total_memories": old_total,
+                "new_total_memories": new_total,
+                "difference": new_total - old_total,
+                "message": f"Stats refreshed successfully. Found {new_total} total memories across all providers."
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to refresh stats: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to refresh stats: {str(e)}")
 
     # =============================================================================
     # DASHBOARD AND ANALYTICS ENDPOINTS
@@ -2250,3 +2280,109 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+
+    @app.post("/admin/refresh-stats")
+    async def refresh_stats(
+        admin_key: str,
+        store: UnifiedVectorStore = Depends(get_store)
+    ):
+        """
+        Manually refresh stats from all providers.
+        
+        This fixes the synchronization issue where stats show 0 memories.
+        """
+        # Validate admin key
+        if admin_key != os.getenv("ADMIN_KEY", "refresh-stats-2025"):
+            raise HTTPException(status_code=403, detail="Invalid admin key")
+        
+        try:
+            # Get old total for comparison
+            old_total = store.stats.get('total_stores', 0)
+            
+            # Refresh stats from providers
+            new_total = await store.refresh_stats()
+            
+            return {
+                "status": "success",
+                "old_total_memories": old_total,
+                "new_total_memories": new_total,
+                "difference": new_total - old_total,
+                "message": f"Stats refreshed successfully. Found {new_total} memories.",
+                "providers": store.stats.get('provider_usage', {})
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to refresh stats: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to refresh stats: {str(e)}")
+
+    @app.delete("/memories/cache")
+    async def clear_query_cache(store: UnifiedVectorStore = Depends(get_store)):
+        """Clear the query cache to ensure fresh results."""
+        try:
+            cache_size_before = len(store.query_cache) if isinstance(store.query_cache, dict) else 0
+            
+            # Clear cache
+            if isinstance(store.query_cache, dict):
+                store.query_cache.clear()
+            else:
+                # Redis cache
+                store.query_cache.flushdb()
+            
+            return {
+                "status": "success",
+                "cache_size_before": cache_size_before,
+                "cache_size_after": 0,
+                "message": "Query cache cleared successfully"
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to clear cache: {e}")
+            raise HTTPException(status_code=500, detail="Failed to clear cache")
+
+    @app.get("/emergency/find-all-memories")
+    async def emergency_find_all(
+        limit: int = 100,
+        store: UnifiedVectorStore = Depends(get_store)
+    ):
+        """
+        Emergency endpoint to directly query all memories from the database.
+        
+        Bypasses all caching and vector operations for diagnostic purposes.
+        """
+        try:
+            # Get pgvector provider
+            pgvector = store.providers.get('pgvector')
+            if not pgvector or not pgvector.enabled:
+                raise HTTPException(status_code=503, detail="PgVector provider not available")
+            
+            # Direct query
+            async with pgvector.connection_pool.acquire() as conn:
+                rows = await conn.fetch(f"""
+                    SELECT id, content, metadata, importance_score, created_at
+                    FROM {pgvector.table_name}
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                """, limit)
+                
+                total_count = await conn.fetchval(f"SELECT COUNT(*) FROM {pgvector.table_name}")
+            
+            return {
+                "status": "success",
+                "total_memories_found": total_count,
+                "memories": [
+                    {
+                        "id": str(row['id']),
+                        "content_preview": row['content'][:100] + "..." if len(row['content']) > 100 else row['content'],
+                        "importance_score": float(row['importance_score']),
+                        "created_at": row['created_at'].isoformat() if row['created_at'] else None
+                    }
+                    for row in rows[:10]  # Show first 10 as preview
+                ],
+                "message": f"Found {total_count} memories via direct database query"
+            }
+            
+        except Exception as e:
+            logger.error(f"Emergency search failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Emergency search failed: {str(e)}")
+
+

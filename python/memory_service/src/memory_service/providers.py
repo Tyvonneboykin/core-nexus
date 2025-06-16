@@ -416,7 +416,7 @@ class PgVectorProvider(VectorProvider):
                         ELSE 1 - (embedding <=> $1::vector)
                     END as similarity_score,
                     created_at
-                FROM vector_memories
+                FROM {self.table_name}
                 {where_clause}
                 WHERE embedding IS NOT NULL
                 ORDER BY embedding <=> $1::vector
@@ -477,7 +477,7 @@ class PgVectorProvider(VectorProvider):
                     metadata,
                     COALESCE(importance_score, 0.5) as importance_score,
                     created_at
-                FROM vector_memories
+                FROM {self.table_name}
                 {where_clause}
                 ORDER BY created_at DESC
                 LIMIT $1

@@ -88,6 +88,9 @@ class UnifiedVectorStore:
             'duplicates_prevented': 0,
             'storage_saved_bytes': 0
         }
+        
+        # Schedule initial stats sync after initialization
+        asyncio.create_task(self._sync_initial_stats())
 
         # Initialize ADM scoring if enabled
         self.adm_enabled = adm_enabled
@@ -439,10 +442,25 @@ class UnifiedVectorStore:
                 if provider == self.primary_provider:
                     overall_healthy = False
 
+        # Calculate actual total memories from provider stats
+        actual_total_memories = 0
+        for provider_name, provider_health in results.items():
+            if provider_health.get('status') == 'healthy' and 'details' in provider_health:
+                details = provider_health['details']
+                if 'details' in details and 'total_vectors' in details['details']:
+                    actual_total_memories += details['details']['total_vectors']
+                elif 'total_vectors' in details:
+                    actual_total_memories += details['total_vectors']
+
+        # Update stats with actual total if available
+        updated_stats = dict(self.stats)
+        if actual_total_memories > 0:
+            updated_stats['total_stores'] = actual_total_memories
+
         return {
             'status': 'healthy' if overall_healthy else 'degraded',
             'providers': results,
-            'stats': self.stats,
+            'stats': updated_stats,
             'cache_size': len(self.query_cache)
         }
 
@@ -603,3 +621,127 @@ class UnifiedVectorStore:
             request.conversation_id or ""
         ]
         return "|".join(key_parts)
+    
+    async def _sync_initial_stats(self):
+        """Synchronize initial stats with actual database counts."""
+        try:
+            # Wait a bit for providers to fully initialize
+            await asyncio.sleep(2)
+            
+            logger.info("Syncing initial stats from providers...")
+            
+            # Get actual counts from each provider
+            total_memories = 0
+            for name, provider in self.providers.items():
+                if provider.enabled:
+                    try:
+                        stats = await provider.get_stats()
+                        if 'total_memories' in stats:
+                            count = stats['total_memories']
+                            total_memories += count
+                            logger.info(f"Provider {name} has {count} memories")
+                    except Exception as e:
+                        logger.warning(f"Failed to get stats from {name}: {e}")
+            
+            # Update our stats with the actual count
+            if total_memories > 0:
+                self.stats['total_stores'] = total_memories
+                logger.info(f"Initialized total_stores to {total_memories} from providers")
+            else:
+                logger.warning("No memories found in any provider during initialization")
+                
+        except Exception as e:
+            logger.error(f"Failed to sync initial stats: {e}")
+    
+    async def refresh_stats(self) -> int:
+        """
+        Manually refresh stats from all providers.
+        Returns the new total count.
+        """
+        try:
+            logger.info("Refreshing stats from all providers...")
+            
+            total_memories = 0
+            provider_counts = {}
+            
+            for name, provider in self.providers.items():
+                if provider.enabled:
+                    try:
+                        count = 0
+                        
+                        # Try to get count from health check
+                        health = await provider.health_check()
+                        if isinstance(health, dict):
+                            # Check various possible locations for the count
+                            if 'total_vectors' in health:
+                                count = health['total_vectors']
+                            elif 'details' in health and 'total_vectors' in health['details']:
+                                count = health['details']['total_vectors']
+                            elif 'total_memories' in health:
+                                count = health['total_memories']
+                        
+                        # Special handling for pgvector
+                        if count == 0 and name == 'pgvector' and hasattr(provider, 'connection_pool'):
+                            async with provider.connection_pool.acquire() as conn:
+                                count = await conn.fetchval("SELECT COUNT(*) FROM vector_memories")
+                        
+                        if count > 0:
+                            total_memories += count
+                            provider_counts[name] = count
+                            logger.info(f"Provider {name} has {count} memories")
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to get count from {name}: {e}")
+                        provider_counts[name] = 0
+            
+            # Update stats
+            old_total = self.stats.get('total_stores', 0)
+            self.stats['total_stores'] = total_memories
+            
+            # Update provider usage
+            for name, count in provider_counts.items():
+                if count > 0:
+                    self.stats['provider_usage'][name] = count
+            
+            logger.info(f"Stats refreshed: {old_total} -> {total_memories} total memories")
+            return total_memories
+            
+        except Exception as e:
+            logger.error(f"Failed to refresh stats: {e}")
+            raise
+
+
+
+    async def refresh_stats(self):
+        """Refresh stats with actual counts from providers."""
+        try:
+            # Get actual counts from each provider
+            total_memories = 0
+            provider_counts = {}
+            
+            for name, provider in self.providers.items():
+                if provider.enabled:
+                    try:
+                        stats = await provider.get_stats()
+                        if 'total_memories' in stats:
+                            count = stats['total_memories']
+                            total_memories += count
+                            provider_counts[name] = count
+                    except Exception as e:
+                        logger.warning(f"Failed to get stats from {name}: {e}")
+                        provider_counts[name] = 0
+            
+            # Update our stats with the actual counts
+            self.stats['total_stores'] = total_memories
+            
+            # Update provider usage if we have counts
+            for name, count in provider_counts.items():
+                if count > 0:
+                    self.stats['provider_usage'][name] = count
+            
+            logger.info(f"Refreshed stats: total_memories={total_memories}, by_provider={provider_counts}")
+            return total_memories
+            
+        except Exception as e:
+            logger.error(f"Failed to refresh stats: {e}")
+            raise
