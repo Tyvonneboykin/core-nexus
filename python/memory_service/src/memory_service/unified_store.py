@@ -291,10 +291,27 @@ class UnifiedVectorStore:
                 if pgvector and pgvector.enabled:
                     # Import emergency search fix
                     from .search_fix import EmergencySearchFix
-                    emergency_search = EmergencySearchFix(pgvector.connection_pool)
                     
-                    # Get ALL memories directly
-                    memories = await emergency_search.emergency_search_all(limit=request.limit)
+                    # Ensure connection pool is initialized
+                    if not pgvector.connection_pool:
+                        logger.error("PgVector connection pool not initialized!")
+                        # Try to get recent memories as fallback
+                        if hasattr(pgvector, 'get_recent_memories'):
+                            memories = await pgvector.get_recent_memories(request.limit, {})
+                        else:
+                            memories = []
+                    else:
+                        try:
+                            emergency_search = EmergencySearchFix(pgvector.connection_pool, pgvector.table_name)
+                            # Get ALL memories directly
+                            memories = await emergency_search.emergency_search_all(limit=request.limit)
+                        except Exception as e:
+                            logger.error(f"Emergency search failed: {e}")
+                            # Try provider's own method as fallback
+                            try:
+                                memories = await pgvector.get_recent_memories(request.limit, {})
+                            except:
+                                memories = []
                     
                     response = QueryResponse(
                         memories=memories[:request.limit],
@@ -360,7 +377,7 @@ class UnifiedVectorStore:
                 pgvector = self.providers.get('pgvector')
                 if pgvector and pgvector.enabled:
                     from .search_fix import EmergencySearchFix
-                    emergency_search = EmergencySearchFix(pgvector.connection_pool)
+                    emergency_search = EmergencySearchFix(pgvector.connection_pool, pgvector.table_name)
                     
                     # Try full-text search
                     memories = await emergency_search.text_search(request.query, limit=request.limit * 2)
@@ -541,14 +558,24 @@ class UnifiedVectorStore:
                              request: QueryRequest) -> list[MemoryResponse]:
         """Query a single provider with proper error handling."""
         try:
-            # Check if this is an empty query (zero vector)
-            is_empty_query = all(v == 0.0 for v in query_embedding)
+            # Check if this is an empty query (zero vector or no embedding)
+            is_empty_query = not query_embedding or all(v == 0.0 for v in query_embedding)
             
             if is_empty_query:
                 # Use get_recent_memories if available (currently only PgVectorProvider)
                 if hasattr(provider, 'get_recent_memories'):
                     logger.info(f"Using get_recent_memories for empty query on {provider.name}")
-                    results = await provider.get_recent_memories(request.limit * 2, request.filters)
+                    try:
+                        results = await provider.get_recent_memories(request.limit * 2, request.filters or {})
+                    except Exception as e:
+                        logger.error(f"get_recent_memories failed: {e}")
+                        # Try emergency search as last resort
+                        if provider.name == 'pgvector' and hasattr(provider, 'connection_pool'):
+                            from .search_fix import EmergencySearchFix
+                            emergency = EmergencySearchFix(provider.connection_pool, provider.table_name)
+                            results = await emergency.emergency_search_all(request.limit * 2)
+                        else:
+                            results = []
                 else:
                     # Fall back to regular query for providers without get_recent_memories
                     logger.info(f"Provider {provider.name} doesn't support get_recent_memories, using regular query")

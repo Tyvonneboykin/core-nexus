@@ -25,8 +25,9 @@ class EmergencySearchFix:
     4. AI-powered semantic search (if needed)
     """
     
-    def __init__(self, connection_pool):
+    def __init__(self, connection_pool, table_name='vector_memories'):
         self.connection_pool = connection_pool
+        self.table_name = table_name
     
     async def emergency_search_all(self, limit: int = 1000) -> list[MemoryResponse]:
         """
@@ -36,14 +37,71 @@ class EmergencySearchFix:
         try:
             async with self.connection_pool.acquire() as conn:
                 # Direct query without vector operations
-                rows = await conn.fetch("""
+                # First, let's check what tables exist in all schemas
+                table_info = await conn.fetch(f"""
+                    SELECT table_schema, table_name 
+                    FROM information_schema.tables 
+                    WHERE table_name = '{self.table_name}' 
+                       OR table_name LIKE '%memor%'
+                       OR table_name LIKE '%vector%'
+                    ORDER BY table_schema, table_name
+                """)
+                
+                logger.info(f"Found tables: {[(t['table_schema'], t['table_name']) for t in table_info]}")
+                
+                # Find the correct schema
+                schema_name = 'public'  # default
+                table_found = False
+                
+                for table in table_info:
+                    if table['table_name'] == self.table_name and table['table_schema'] != 'information_schema':
+                        schema_name = table['table_schema']
+                        table_found = True
+                        break
+                
+                if not table_found and table_info:
+                    # Use the first memory-related table found
+                    for table in table_info:
+                        if 'memor' in table['table_name'] and table['table_schema'] not in ('information_schema', 'pg_catalog'):
+                            schema_name = table['table_schema']
+                            self.table_name = table['table_name']
+                            logger.info(f"Using table: {schema_name}.{self.table_name}")
+                            break
+                
+                # Use fully qualified table name
+                full_table_name = f"{schema_name}.{self.table_name}"
+                
+                table_check = 1
+                
+                if table_check == 0:
+                    logger.error(f"Table {self.table_name} does not exist!")
+                    # Try alternative table names
+                    for alt_table in ['memories', 'memory_vectors', 'vectors']:
+                        alt_check = await conn.fetchval(f"""
+                            SELECT COUNT(*) 
+                            FROM information_schema.tables 
+                            WHERE table_name = '{alt_table}'
+                        """)
+                        if alt_check > 0:
+                            logger.info(f"Found alternative table: {alt_table}")
+                            self.table_name = alt_table
+                            break
+                
+                # Get total count first
+                full_table_name = f"{schema_name}.{self.table_name}"
+                total_count = await conn.fetchval(f"SELECT COUNT(*) FROM {full_table_name}")
+                logger.info(f"Total memories in {full_table_name}: {total_count}")
+                
+                # Now fetch the actual rows
+                rows = await conn.fetch(f"""
                     SELECT 
                         id, 
                         content, 
                         metadata, 
                         importance_score,
                         created_at
-                    FROM vector_memories
+                    FROM {full_table_name}
+                    WHERE content IS NOT NULL
                     ORDER BY created_at DESC
                     LIMIT $1
                 """, limit)
@@ -75,7 +133,8 @@ class EmergencySearchFix:
         try:
             async with self.connection_pool.acquire() as conn:
                 # Use PostgreSQL full-text search
-                rows = await conn.fetch("""
+                full_table_name = f"public.{self.table_name}"
+                rows = await conn.fetch(f"""
                     SELECT 
                         id,
                         content,
@@ -86,7 +145,7 @@ class EmergencySearchFix:
                             to_tsvector('english', content),
                             plainto_tsquery('english', $1)
                         ) as rank
-                    FROM vector_memories
+                    FROM {full_table_name}
                     WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
                     ORDER BY rank DESC, created_at DESC
                     LIMIT $2
@@ -128,6 +187,7 @@ class EmergencySearchFix:
                 
                 where_clause = " OR ".join(conditions) if conditions else "TRUE"
                 
+                full_table_name = f"public.{self.table_name}"
                 rows = await conn.fetch(f"""
                     SELECT 
                         id,
@@ -135,7 +195,7 @@ class EmergencySearchFix:
                         metadata,
                         importance_score,
                         created_at
-                    FROM vector_memories
+                    FROM {full_table_name}
                     WHERE {where_clause}
                     ORDER BY created_at DESC
                     LIMIT $1
@@ -176,20 +236,21 @@ class EmergencySearchFix:
         try:
             async with self.connection_pool.acquire() as conn:
                 # Count total memories
-                total_count = await conn.fetchval("SELECT COUNT(*) FROM vector_memories")
+                full_table_name = f"public.{self.table_name}"
+                total_count = await conn.fetchval(f"SELECT COUNT(*) FROM {full_table_name}")
                 
                 # Count memories with embeddings
                 with_embeddings = await conn.fetchval(
-                    "SELECT COUNT(*) FROM vector_memories WHERE embedding IS NOT NULL"
+                    f"SELECT COUNT(*) FROM {full_table_name} WHERE embedding IS NOT NULL"
                 )
                 
                 # Count memories without embeddings
                 without_embeddings = total_count - with_embeddings
                 
                 # Get sample of memories without embeddings
-                missing_samples = await conn.fetch("""
+                missing_samples = await conn.fetch(f"""
                     SELECT id, SUBSTRING(content, 1, 100) as content_preview
-                    FROM vector_memories
+                    FROM {full_table_name}
                     WHERE embedding IS NULL
                     LIMIT 5
                 """)
