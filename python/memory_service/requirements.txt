@@ -5,7 +5,7 @@ fastapi>=0.116.0
 uvicorn[standard]==0.32.1
 
 # Data models and validation
-pydantic>=2.11.7,<3.0.0    # Latest v2.11.7 (June 25) for google-cloud-aiplatform compatibility
+pydantic>=2.11.7,<3.0.0    # Latest v2.11.7 (June 2025) for google-cloud-aiplatform compatibility
 
 # Database drivers
 asyncpg==0.29.0           # PostgreSQL async driver for pgvector
